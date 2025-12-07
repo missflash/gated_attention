@@ -297,25 +297,22 @@ class Qwen3Attention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states_proj = self.q_proj(hidden_states)
+        key_states_proj = self.k_proj(hidden_states)
+        value_states_proj = self.v_proj(hidden_states)
 
         if self.headwise_attn_output_gate:
-            query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
-            query_states, gate_score = torch.split(query_states, [self.head_dim * self.num_key_value_groups, self.num_key_value_groups], dim=-1)
-            gate_score = gate_score.reshape(bsz, q_len, -1, 1)
-            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            query_states_proj, gate_score = torch.split(query_states_proj, [self.num_heads * self.head_dim, self.num_heads], dim=-1)
+            gate_score = gate_score.view(bsz, q_len, -1, 1)
         elif self.elementwise_attn_output_gate:
-            query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
-            query_states, gate_score = torch.split(query_states, [self.head_dim * self.num_key_value_groups, self.head_dim * self.num_key_value_groups], dim=-1)
-            gate_score = gate_score.reshape(bsz, q_len, -1, self.head_dim)
-            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            query_states_proj, gate_score = torch.split(query_states_proj, [self.num_heads * self.head_dim, self.num_heads * self.head_dim], dim=-1)
+            gate_score = gate_score.view(bsz, q_len, -1, self.head_dim)
         else:
-            query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        
-        key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            gate_score = None # No gate score if gating is not active
+
+        query_states = query_states_proj.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states_proj.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states_proj.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
 
         if self.use_qk_norm:
@@ -352,7 +349,7 @@ class Qwen3Attention(nn.Module):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
-        if self.headwise_attn_output_gate or self.elementwise_attn_output_gate:
+        if gate_score is not None:
             attn_output = attn_output * torch.sigmoid(gate_score)
 
         attn_output = attn_output.reshape(bsz, q_len, -1)
@@ -383,37 +380,24 @@ class Qwen3FlashAttention2(Qwen3Attention):
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
 
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Cache] = None,
-            output_attentions: bool = False,
-            use_cache: bool = False,
-            cache_position: Optional[torch.LongTensor] = None,
-            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-    ):
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states_proj = self.q_proj(hidden_states)
+        key_states_proj = self.k_proj(hidden_states)
+        value_states_proj = self.v_proj(hidden_states)
 
         if self.headwise_attn_output_gate:
-            query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
-            query_states, gate_score = torch.split(query_states, [self.head_dim * self.num_key_value_groups, self.num_key_value_groups], dim=-1)
-            gate_score = gate_score.reshape(bsz, q_len, -1, 1)
-            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            query_states_proj, gate_score = torch.split(query_states_proj, [self.num_heads * self.head_dim, self.num_heads], dim=-1)
+            gate_score = gate_score.view(bsz, q_len, -1, 1)
         elif self.elementwise_attn_output_gate:
-            query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
-            query_states, gate_score = torch.split(query_states, [self.head_dim * self.num_key_value_groups, self.head_dim * self.num_key_value_groups], dim=-1)
-            gate_score = gate_score.reshape(bsz, q_len, -1, self.head_dim)
-            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            query_states_proj, gate_score = torch.split(query_states_proj, [self.num_heads * self.head_dim, self.num_heads * self.head_dim], dim=-1)
+            gate_score = gate_score.view(bsz, q_len, -1, self.head_dim)
         else:
-            query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            gate_score = None
+
+        query_states = query_states_proj.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states_proj.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states_proj.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         if self.use_qk_norm:
             query_states = self.q_norm(query_states)
@@ -480,7 +464,7 @@ class Qwen3FlashAttention2(Qwen3Attention):
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
 
-        if self.headwise_attn_output_gate or self.elementwise_attn_output_gate:
+        if gate_score is not None:
             attn_output = attn_output * torch.sigmoid(gate_score)
             
         attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
@@ -530,26 +514,22 @@ class Qwen3SdpaAttention(Qwen3Attention):
 
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        query_states_proj = self.q_proj(hidden_states)
+        key_states_proj = self.k_proj(hidden_states)
+        value_states_proj = self.v_proj(hidden_states)
 
         if self.headwise_attn_output_gate:
-            query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
-            query_states, gate_score = torch.split(query_states, [self.head_dim * self.num_key_value_groups, self.num_key_value_groups], dim=-1)
-            gate_score = gate_score.reshape(bsz, q_len, -1, 1)
-            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            query_states_proj, gate_score = torch.split(query_states_proj, [self.num_heads * self.head_dim, self.num_heads], dim=-1)
+            gate_score = gate_score.view(bsz, q_len, -1, 1)
         elif self.elementwise_attn_output_gate:
-            query_states = query_states.view(bsz, q_len, self.num_key_value_heads, -1)
-            query_states, gate_score = torch.split(query_states, [self.head_dim * self.num_key_value_groups, self.head_dim * self.num_key_value_groups], dim=-1)
-            gate_score = gate_score.reshape(bsz, q_len, -1, self.head_dim)
-            query_states = query_states.reshape(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            query_states_proj, gate_score = torch.split(query_states_proj, [self.num_heads * self.head_dim, self.num_heads * self.head_dim], dim=-1)
+            gate_score = gate_score.view(bsz, q_len, -1, self.head_dim)
         else:
-            query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+            gate_score = None
 
-        if self.use_qk_norm:
+        query_states = query_states_proj.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states_proj.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states_proj.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             query_states = self.q_norm(query_states)
             key_states = self.k_norm(key_states)
 
@@ -591,7 +571,7 @@ class Qwen3SdpaAttention(Qwen3Attention):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
 
-        if self.headwise_attn_output_gate or self.elementwise_attn_output_gate:
+        if gate_score is not None:
             attn_output = attn_output * torch.sigmoid(gate_score)
 
         attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)
